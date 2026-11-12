@@ -58,6 +58,90 @@ SONGS = [
 ]
 
 
+SONGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "songs")
+
+
+def load_midi(path):
+    """Minimal Standard MIDI File reader -> melody as a list of MIDI note numbers.
+
+    Takes the highest note at each onset from the most melody-like track/channel
+    (drum channel ignored). Timing is dropped: one tile plays one note.
+    """
+    with open(path, "rb") as f:
+        d = f.read()
+    if d[:4] != b"MThd":
+        raise ValueError("not a MIDI file")
+    ntr = int.from_bytes(d[10:12], "big")
+    pos = 8 + int.from_bytes(d[4:8], "big")
+    groups = {}
+
+    def varlen(p):
+        v = 0
+        while True:
+            b = d[p]
+            p += 1
+            v = (v << 7) | (b & 0x7F)
+            if b < 0x80:
+                return v, p
+
+    for tr in range(ntr):
+        if d[pos:pos + 4] != b"MTrk":
+            break
+        p = pos + 8
+        end = pos = p + int.from_bytes(d[pos + 4:pos + 8], "big")
+        t = status = 0
+        while p < end:
+            dv, p = varlen(p)
+            t += dv
+            if d[p] >= 0x80:
+                status = d[p]
+                p += 1
+            if status == 0xFF:
+                ln, p = varlen(p + 1)
+                p += ln
+            elif status in (0xF0, 0xF7):
+                ln, p = varlen(p)
+                p += ln
+            elif status & 0xF0 in (0xC0, 0xD0):
+                p += 1
+            else:
+                note, vel = d[p], d[p + 1]
+                p += 2
+                ch = status & 0x0F
+                if status & 0xF0 == 0x90 and vel > 0 and ch != 9:
+                    g = groups.setdefault((tr, ch), {})
+                    g[t] = max(g.get(t, 0), note)
+    if not groups:
+        raise ValueError("no notes")
+    most = max(len(g) for g in groups.values())
+    cands = [g for g in groups.values() if len(g) >= most * 0.3]
+    g = max(cands, key=lambda g: sum(g.values()) / len(g))
+    seq = []
+    for t in sorted(g):
+        n = g[t]
+        while n < 48:
+            n += 12
+        while n > 96:
+            n -= 12
+        seq.append(n)
+    if len(seq) < 4:
+        raise ValueError("too few notes")
+    return seq
+
+
+def load_user_songs():
+    try:
+        os.makedirs(SONGS_DIR, exist_ok=True)
+        files = sorted(f for f in os.listdir(SONGS_DIR) if f.lower().endswith((".mid", ".midi")))
+    except OSError:
+        return
+    for f in files:
+        try:
+            SONGS.append((os.path.splitext(f)[0][:22].upper(), load_midi(os.path.join(SONGS_DIR, f))))
+        except Exception as e:
+            print(f"[songs] skipped {f}: {e}")
+
+
 def build_sounds():
     pitches = set(PENTA)
     for _, seq in SONGS:
@@ -107,6 +191,8 @@ class Game:
         self.screen = pygame.display.set_mode((W, H))
         self.canvas = pygame.Surface((W, H))
         self.clock = pygame.time.Clock()
+        load_user_songs()
+        self.f_song = pygame.font.SysFont("applesdgothicneo,malgungothic,arial", 28, bold=True)
         try:
             self.notes, self.fail_snd = build_sounds()
         except pygame.error:
@@ -365,8 +451,8 @@ class Game:
             cy = r.centery
             pygame.draw.polygon(c, (255, 255, 255), [(r.left + 18, cy), (r.left + 34, cy - 11), (r.left + 34, cy + 11)])
             pygame.draw.polygon(c, (255, 255, 255), [(r.right - 18, cy), (r.right - 34, cy - 11), (r.right - 34, cy + 11)])
-            self.text(self.f_mid, SONGS[self.song_i][0], (255, 255, 255), (W // 2, cy))
-            self.text(self.f_sm, f"LEFT / RIGHT : song  {self.song_i + 1}/{len(SONGS)}", (150, 160, 200), (W // 2, 372), shadow=False)
+            self.text(self.f_song, SONGS[self.song_i][0], (255, 255, 255), (W // 2, cy))
+            self.text(self.f_sm, f"LEFT / RIGHT : song {self.song_i + 1}/{len(SONGS)}   (add .mid to songs/)", (150, 160, 200), (W // 2, 372), shadow=False)
 
         if self.state == "over":
             k = min(1.0, self.over_t * 3)
@@ -380,7 +466,7 @@ class Game:
             c.blit(panel, (W // 2 - 180, H // 2 - 150 + oy))
             a = int(255 * k)
             self.text(self.f_mid, "GAME OVER", (255, 90, 120), (W // 2, H // 2 - 105 + oy), a)
-            self.text(self.f_sm, SONGS[self.song_i][0], (200, 205, 235), (W // 2, H // 2 - 70 + oy), a)
+            self.text(self.f_song, SONGS[self.song_i][0], (200, 205, 235), (W // 2, H // 2 - 68 + oy), a, scale=0.7)
             self.text(self.f_big, str(self.score), (255, 255, 255), (W // 2, H // 2 - 20 + oy), a)
             if self.new_best:
                 self.text(self.f_sm, "NEW BEST!", hue_rgb(self.time, 0.6), (W // 2, H // 2 + 45 + oy), a)
